@@ -201,6 +201,30 @@ def first_working_series_id(candidates: list[str], start_date: str) -> str:
             last_err = e
     raise ValueError(f"No working FRED series from candidates={candidates}. Last error: {last_err}")
 
+def help_text(text: str):
+    st.caption(f"ℹ️ {text}")
+    
+def is_rising(s: pd.Series, months: int = 3) -> bool:
+    """True if last value > value ~N months ago (monthly-resampled)."""
+    if s is None or s.empty or not isinstance(s.index, (pd.DatetimeIndex, pd.PeriodIndex)):
+        return False
+    sm = to_monthly(s.dropna())
+    if sm.empty:
+        return False
+    end = sm.iloc[-1]
+    start_idx = sm.index[-1] - relativedelta(months=months)
+    prior = sm.loc[:start_idx]
+    if prior.empty:
+        return False
+    start = prior.iloc[-1]
+    return float(end) > float(start)
+
+def is_falling(s: pd.Series, months: int = 3) -> bool:
+    return is_rising(-s, months=months)
+
+def badge(ok: bool, good: str = "✅", bad: str = "⚠️") -> str:
+    return good if ok else bad
+   
 # -----------------------------
 # App
 # -----------------------------
@@ -210,6 +234,51 @@ st.title("Macro Dashboard (Auto-updating)")
 start = (date.today() - relativedelta(years=DEFAULT_LOOKBACK_YEARS)).isoformat()
 chart_start = (date.today() - relativedelta(years=CHART_YEARS)).isoformat()
 
+playbook = [
+    {
+        "Indicator": "Yield curve (10Y–2Y)",
+        "Risk-on tends to like": "Equities (cyclicals), small caps",
+        "Risk-off tends to like": "Long-duration Treasuries, defensives",
+        "How to read": "Steepening is usually pro-growth; inversion/flattening is caution."
+    },
+    {
+        "Indicator": "Financial Conditions (NFCI)",
+        "Risk-on tends to like": "Equities, credit, high beta",
+        "Risk-off tends to like": "Cash, Treasuries",
+        "How to read": "Rising NFCI = tightening liquidity; falling = easing."
+    },
+    {
+        "Indicator": "Fed Funds vs Core CPI",
+        "Risk-on tends to like": "Equities (especially when easing starts)",
+        "Risk-off tends to like": "Cash/short duration during hikes",
+        "How to read": "Rates > inflation = restrictive; gap shrinking = pressure easing."
+    },
+    {
+        "Indicator": "Activity proxies (IPMAN/INDPRO) momentum",
+        "Risk-on tends to like": "Cyclicals, industrials, commodities",
+        "Risk-off tends to like": "Defensives, quality",
+        "How to read": "Rising momentum supports earnings; falling momentum = slowdown risk."
+    },
+    {
+        "Indicator": "Jobless Claims (4W MA)",
+        "Risk-on tends to like": "Equities broadly",
+        "Risk-off tends to like": "Treasuries, defensives",
+        "How to read": "Claims rising is an early recession alarm."
+    },
+    {
+        "Indicator": "Credit spreads (IG/HY OAS)",
+        "Risk-on tends to like": "Credit, equities, small caps",
+        "Risk-off tends to like": "Treasuries, cash",
+        "How to read": "Widening spreads = stress building (often pre-equity weakness)."
+    },
+    {
+        "Indicator": "SPY trend (50d–200d)",
+        "Risk-on tends to like": "Equities",
+        "Risk-off tends to like": "Trend-following defensive stance (cash/bonds)",
+        "How to read": "Positive = risk-on regime; negative = risk-off."
+    },
+]
+
 with st.sidebar:
     st.header("Settings")
     st.write("Data: FRED + Yahoo Finance (SPY).")
@@ -217,6 +286,21 @@ with st.sidebar:
     st.caption("Tip: keep this to 3–7 years for readability.")
     chart_start = (date.today() - relativedelta(years=chart_years)).isoformat()
 
+    st.divider()
+    st.subheader("Asset Class Playbook")
+
+    df_playbook = pd.DataFrame(playbook)
+    df_playbook_inverted = df_playbook.set_index("Indicator").T
+    st.dataframe(
+        df_playbook_inverted,
+        width="stretch",
+        hide_index=True
+    )
+
+    st.caption(
+        "Rule-of-thumb mapping for regime awareness. "
+        "Not investment advice."
+    )
 # --- Load series
 try:
     # PMI (dynamic search)
@@ -375,18 +459,46 @@ def regime_from_score(s: int) -> str:
 # -----------------------------
 st.subheader(f"Cycle Score: {score}  →  {regime_from_score(score)}")
 
+st.markdown("## What would worry me (checklist)")
+
+# Build signals from your existing series
+yc_flattening = is_falling(yc, months=3)              # curve flattening
+nfci_tightening = is_rising(nfci, months=3)           # NFCI rising = tightening
+claims_rising = is_rising(claims_4w, months=3)         # layoffs
+spreads_widening = is_rising(hy_oas, months=3) or is_rising(ig_oas, months=3)
+inflation_reaccel = is_rising(core_cpi_yoy, months=3)  # core inflation picking up
+equity_trend_down = last_value(spy_trend) < 0 if not spy_trend.empty else False
+gdp_slipping = is_falling(gdp_yoy, months=6)
+
+checks = [
+    (badge(not yc_flattening), "Yield curve is not flattening", "Flattening/inversion risk rising (growth risk)"),
+    (badge(not nfci_tightening), "Financial conditions not tightening fast", "Liquidity tightening (risk-off pressure)"),
+    (badge(not claims_rising), "Jobless claims not rising", "Labor market cracking (recession risk)"),
+    (badge(not spreads_widening), "Credit spreads not widening", "Credit stress building (often leads equities)"),
+    (badge(not inflation_reaccel), "Core inflation not re-accelerating", "Sticky/re-accelerating inflation (Fed constraint)"),
+    (badge(not equity_trend_down), "Equity trend still supportive", "Trend turning down (regime shift risk)"),
+    (badge(not gdp_slipping), "GDP trend not deteriorating fast", "Growth decelerating (confirmation of slowdown)"),
+]
+
+for icon, ok_txt, warn_txt in checks:
+    st.write(f"{icon} {ok_txt if icon=='✅' else warn_txt}")
+
+st.caption("If you start seeing multiple ⚠️ at once, your regime is usually shifting toward slowdown/risk-off.")
+
 # Top row – Where are we?
 c1, c2, c3 = st.columns(3)
 
 with c1:
     st.markdown("### Yield Curve (10Y–2Y)")
     st.metric("Latest", fmt(last_value(yc), "%"), delta=fmt(yc_d3, "%"))
-    st.line_chart(yc.loc[chart_start:])
+    help_text("10Y minus 2Y Treasury yield. Steepening (more positive) is usually pro-growth; inversion is a classic recession warning.")
+    st.line_chart(yc.loc[chart_start:], height=300)
 
 with c2:
     st.markdown("### Financial Conditions (NFCI)")
     st.metric("Latest", fmt(last_value(nfci)), delta=fmt(nf_d3))
-    st.line_chart(nfci.loc[chart_start:])
+    help_text("Chicago Fed NFCI. Higher = tighter credit/less liquidity (worse for risk assets). Lower/negative = easier conditions.")
+    st.line_chart(nfci.loc[chart_start:], height=300)
 
 with c3:
     st.markdown("### Policy Rate vs Inflation")
@@ -394,30 +506,32 @@ with c3:
     latest_core = last_value(core_cpi_yoy)
     st.metric("Fed Funds", fmt(latest_ff, "%"), delta=fmt(ff_d3, "%"))
     st.metric("Core CPI YoY", fmt(latest_core, "%"), delta=fmt(core_d3, "%"))
-    comb = pd.DataFrame(
-        {"FedFunds": fed_funds, "CoreCPI_YoY": core_cpi_yoy}
-    ).loc[chart_start:]
-    st.line_chart(comb)
+    help_text("Fed Funds = policy rate. Core CPI YoY = underlying inflation. If rates > inflation, policy is restrictive; gap shrinking usually means less pressure ahead.")
+    comb = pd.DataFrame({"Interest Rates": fed_funds, "Inflation": core_cpi_yoy}).loc[chart_start:]
+    st.line_chart(comb, height=300)
 
 # Middle – Is growth accelerating?
 st.markdown("### Is growth accelerating?")
 m1, m2, m3 = st.columns(3)
 
 with m1:
-    st.markdown("**PMI Trend (Mfg + Services)**")
-    st.metric("PMI (Mfg)", fmt(last_value(mfg_activity), "idx"), delta=fmt(mfg_d3, "idx"))
-    st.metric("PMI (Services)", fmt(last_value(broad_activity), "idx"), delta=fmt(srv_d3, "idx"))
-    st.line_chart(pd.DataFrame({"PMI_Mfg": mfg_activity, "PMI_Services": broad_activity}).loc[chart_start:])
+    st.markdown("**Activity (Manufacturing + Broad)**")
+    st.metric("Manufacturing", fmt(last_value(mfg_activity), "idx"), delta=fmt(mfg_d3, "idx"))
+    st.metric("Broad Activity", fmt(last_value(broad_activity), "idx"), delta=fmt(srv_d3, "idx"))
+    help_text("These are activity proxies (levels). Focus on the direction and your 3M/6M deltas; rising momentum suggests improving growth.")
+    st.line_chart(pd.DataFrame({"Mfg": mfg_activity, "Broad": broad_activity}).loc[chart_start:], height=300)
 
 with m2:
     st.markdown("**Jobless Claims (4-week avg)**")
     st.metric("ICSA 4W MA", fmt(last_value(claims_4w), "k"), delta=fmt(cl_d3, "k"))
-    st.line_chart(claims_4w.loc[chart_start:])
+    help_text("Weekly layoffs signal. Rising claims = labor market weakening (often early recession risk); falling = labor still solid.")
+    st.line_chart(claims_4w.loc[chart_start:], height=300)
 
 with m3:
     st.markdown("**Real GDP YoY (confirmation)**")
     st.metric("GDP YoY", fmt(last_value(gdp_yoy), "%"), delta=fmt(gdp_d3, "%"))
-    st.line_chart(gdp_yoy.loc[chart_start:])
+    help_text("Backward-looking confirmation. GDP tends to move after surveys/claims. Use it to confirm, not to lead.")
+    st.line_chart(gdp_yoy.loc[chart_start:], height=300)
 
 # Bottom – Risk signals
 st.markdown("### Risk signals")
@@ -427,18 +541,21 @@ with b1:
     st.markdown("**Inflation (Headline vs Core)**")
     st.metric("CPI YoY", fmt(last_value(cpi_yoy), "%"), delta=fmt(cpi_d3, "%"))
     st.metric("Core CPI YoY", fmt(last_value(core_cpi_yoy), "%"), delta=fmt(core_d3, "%"))
-    st.line_chart(pd.DataFrame({"CPI_YoY": cpi_yoy, "CoreCPI_YoY": core_cpi_yoy}).loc[chart_start:])
+    help_text("Disinflation supports future easing. Core is stickier and matters more for the Fed; re-acceleration is a risk signal.")
+    st.line_chart(pd.DataFrame({"CPI_YoY": cpi_yoy, "CoreCPI_YoY": core_cpi_yoy}).loc[chart_start:], height=300)
 
 with b2:
     st.markdown("**Credit Spreads (IG / HY OAS)**")
     st.metric("IG OAS", fmt(last_value(ig_oas), "%"), delta=fmt(ig_d3, "%"))
     st.metric("HY OAS", fmt(last_value(hy_oas), "%"), delta=fmt(hy_d3, "%"))
-    st.line_chart(pd.DataFrame({"IG_OAS": ig_oas, "HY_OAS": hy_oas}).loc[chart_start:])
+    help_text("Credit stress gauge. Widening spreads = risk rising/default fear; tightening = confidence. Credit often cracks before equities.")
+    st.line_chart(pd.DataFrame({"IG_OAS": ig_oas, "HY_OAS": hy_oas}).loc[chart_start:], height=300)
 
 with b3:
     st.markdown("**Equity Trend (SPY 50d vs 200d)**")
     st.metric("Trend (50-200)", fmt(last_value(spy_trend)), delta=fmt(tr_d3))
-    st.line_chart(spy_trend.loc[chart_start:])
+    help_text("Simple trend filter. Positive = risk-on regime; negative = risk-off. Useful for avoiding the worst drawdowns, not for perfect timing.")
+    st.line_chart(spy_trend.loc[chart_start:], height=300)
 
 # -----------------------------
 # Summary table
@@ -461,8 +578,5 @@ for name, val, unit, d3, d6, hib in metrics:
     )
 
 st.dataframe(pd.DataFrame(rows), width="stretch")
+st.caption("Activity proxies are loaded from FRED (defaults: IPMAN, INDPRO). Use the advanced overrides if you want different series.")
 
-st.caption(
-    "PMIs are fetched via FRED search at runtime (top match). "
-    "If you want specific PMI providers/series IDs, hardcode them once you choose the source."
-)
