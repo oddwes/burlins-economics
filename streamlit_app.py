@@ -45,13 +45,13 @@ SERIES = {
 
 # PMI: we’ll find series IDs via FRED search at runtime
 PMI_QUERIES = {
-    "pmi_mfg": "ISM Manufacturing PMI",
-    "pmi_srv": "ISM Non-Manufacturing PMI",
+    "mfg_activity": "ISM Manufacturing PMI",
+    "broad_activity": "ISM Non-Manufacturing PMI",
 }
 
 PMI_FALLBACK_IDS = {
-    "pmi_mfg": ["NAPM"],                 # ISM Manufacturing PMI
-    "pmi_srv": ["NAPMNOI", "NAPMNMI"],   # try these in order (some accounts/regions differ)
+    "mfg_activity": ["NAPM"],                 # ISM Manufacturing PMI
+    "broad_activity": ["NAPMNOI", "NAPMNMI"],   # try these in order (some accounts/regions differ)
 }
 
 MARKET = {
@@ -114,10 +114,14 @@ def pct_change(s: pd.Series, months: int) -> float:
     end = s.dropna().iloc[-1]
     start_idx = s.dropna().index[-1] - relativedelta(months=months)
     start = s.dropna().loc[:start_idx].iloc[-1] if not s.dropna().loc[:start_idx].empty else float("nan")
-    return float(end - start)
+    delta = end - start
+    return float(delta.iloc[0]) if isinstance(delta, pd.Series) else float(delta)
 
 def last_value(s: pd.Series) -> float:
-    return float(s.dropna().iloc[-1]) if not s.dropna().empty else float("nan")
+    if s is None or s.dropna().empty:
+        return float("nan")
+    v = s.dropna().iloc[-1]
+    return float(v.iloc[0]) if isinstance(v, pd.Series) else float(v)
 
 def fmt(x, unit=""):
     if pd.isna(x):
@@ -212,34 +216,17 @@ with st.sidebar:
     chart_years = st.slider("Chart window (years)", 1, 15, CHART_YEARS)
     st.caption("Tip: keep this to 3–7 years for readability.")
     chart_start = (date.today() - relativedelta(years=chart_years)).isoformat()
-    st.subheader("Find PMI series IDs")
-    q = st.text_input("Search FRED series", value="PMI")
-    if q:
-        res = fred_search_series(q, limit=10)
-        if res.empty:
-            st.write("No results.")
-        else:
-            st.dataframe(res, width="stretch")
-            st.caption("Copy the 'id' you want into the overrides below.")
 
 # --- Load series
 try:
     # PMI (dynamic search)
-    st.subheader("Series overrides")
+    st.subheader("Series overrides (advanced)")
 
-    pmi_mfg_id_input = st.text_input("PMI Manufacturing series id", value="NAPM")
-    pmi_srv_id_input = st.text_input("PMI Services series id", value="NAPMNOI")
-    # PMI (explicit IDs; no search fallback)
-    pmi_mfg_id = pmi_mfg_id_input.strip()
-    pmi_srv_id = pmi_srv_id_input.strip()
+    mfg_activity_id = st.text_input("Manufacturing activity (default IPMAN)", value="IPMAN")
+    broad_activity_id = st.text_input("Broad activity (default INDPRO)", value="INDPRO")
 
-    try:
-        pmi_mfg = fred_series(pmi_mfg_id, start)
-        pmi_srv = fred_series(pmi_srv_id, start)
-    except Exception as e:
-        st.warning(f"PMI unavailable: {e}")
-        pmi_mfg = pd.Series(dtype=float)
-        pmi_srv = pd.Series(dtype=float)
+    mfg_activity = fred_series(mfg_activity_id.strip(), start)
+    broad_activity = fred_series(broad_activity_id.strip(), start)
 
     gdp = fred_series(SERIES["real_gdp"], start)
     unrate = fred_series(SERIES["unrate"], start)
@@ -300,13 +287,17 @@ def deltas(s: pd.Series) -> tuple[float, float]:
 metrics = []
 
 # Growth/Demand
-mfg_d3, mfg_d6 = deltas(pmi_mfg)
-srv_d3, srv_d6 = deltas(pmi_srv)
+mfg_activity_yoy = yoy(to_monthly(mfg_activity), 12)
+broad_activity_yoy = yoy(to_monthly(broad_activity), 12)
+
+mfg_d3, mfg_d6 = deltas(mfg_activity_yoy)
+srv_d3, srv_d6 = deltas(broad_activity_yoy)
+
 gdp_d3, gdp_d6 = deltas(gdp_yoy)
 
 metrics += [
-    ("PMI (Mfg)", last_value(pmi_mfg), "idx", mfg_d3, mfg_d6, True),
-    ("PMI (Services)", last_value(pmi_srv), "idx", srv_d3, srv_d6, True),
+    ("Manufacturing Activity", last_value(mfg_activity), "", mfg_d3, mfg_d6, True),
+    ("Broad Activity", last_value(broad_activity), "", srv_d3, srv_d6, True),
     ("Real GDP YoY", last_value(gdp_yoy), "%", gdp_d3, gdp_d6, True),
 ]
 
@@ -414,9 +405,9 @@ m1, m2, m3 = st.columns(3)
 
 with m1:
     st.markdown("**PMI Trend (Mfg + Services)**")
-    st.metric("PMI (Mfg)", fmt(last_value(pmi_mfg), "idx"), delta=fmt(mfg_d3, "idx"))
-    st.metric("PMI (Services)", fmt(last_value(pmi_srv), "idx"), delta=fmt(srv_d3, "idx"))
-    st.line_chart(pd.DataFrame({"PMI_Mfg": pmi_mfg, "PMI_Services": pmi_srv}).loc[chart_start:])
+    st.metric("PMI (Mfg)", fmt(last_value(mfg_activity), "idx"), delta=fmt(mfg_d3, "idx"))
+    st.metric("PMI (Services)", fmt(last_value(broad_activity), "idx"), delta=fmt(srv_d3, "idx"))
+    st.line_chart(pd.DataFrame({"PMI_Mfg": mfg_activity, "PMI_Services": broad_activity}).loc[chart_start:])
 
 with m2:
     st.markdown("**Jobless Claims (4-week avg)**")
