@@ -16,6 +16,8 @@ import requests
 import streamlit as st
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
+import time
+import random
 
 # -----------------------------
 # Config
@@ -100,7 +102,7 @@ def fred_series(series_id: str, start_date: str) -> pd.Series:
 
 def to_monthly(s: pd.Series) -> pd.Series:
     # robust monthly resample (last value in month)
-    return s.resample("M").last()
+    return s.resample("ME").last()  # month-end
 
 def yoy(s: pd.Series, periods: int) -> pd.Series:
     # YoY % change (periods=12 for monthly, 4 for quarterly)
@@ -153,15 +155,37 @@ def score_indicator(value: float, good_when_high: bool, neutral_band: tuple[floa
         return 0
     return 1 if (value > 0) == good_when_high else -1
 
-@st.cache_data(ttl=6 * 60 * 60)
-def fetch_spy(start: str) -> pd.Series:
-    df = yf.download(MARKET["equity"], start=start, progress=False, auto_adjust=True)
-    if df.empty:
-        return pd.Series(dtype=float)
-    s = df["Close"].copy()
-    s.index = pd.to_datetime(s.index)
-    s.name = "SPY"
-    return s
+import time
+import random
+
+@st.cache_data(ttl=24 * 60 * 60)  # cache 24h to reduce rate limits
+def fetch_spy(start: str, ticker: str = "SPY", max_retries: int = 6) -> pd.Series:
+    last_err = None
+
+    for attempt in range(max_retries):
+        try:
+            df = yf.download(
+                ticker,
+                start=start,
+                progress=False,
+                auto_adjust=True,
+                threads=False,   # helps a bit on rate limits
+            )
+            if df is None or df.empty or "Close" not in df.columns:
+                raise RuntimeError("No data returned from yfinance")
+
+            s = df["Close"].copy()
+            s.index = pd.to_datetime(s.index)
+            s.name = ticker
+            return s
+
+        except Exception as e:
+            last_err = e
+            # exponential backoff + jitter
+            sleep_s = min(60, (2 ** attempt)) + random.random()
+            time.sleep(sleep_s)
+
+    raise RuntimeError(f"yfinance failed after {max_retries} attempts: {last_err}")
 
 def first_working_series_id(candidates: list[str], start_date: str) -> str:
     last_err = None
@@ -195,7 +219,7 @@ with st.sidebar:
         if res.empty:
             st.write("No results.")
         else:
-            st.dataframe(res, use_container_width=True)
+            st.dataframe(res, width="stretch")
             st.caption("Copy the 'id' you want into the overrides below.")
 
 # --- Load series
@@ -233,7 +257,11 @@ try:
 
     nfci = fred_series(SERIES["nfci"], start)
 
-    spy = fetch_spy(start)
+    try:
+        spy = fetch_spy(start)
+    except Exception as e:
+        st.warning(f"Market data unavailable (rate-limited): {e}")
+        spy = pd.Series(dtype=float)
 except Exception as e:
     st.exception(e)
     st.stop()
@@ -441,7 +469,7 @@ for name, val, unit, d3, d6, hib in metrics:
         }
     )
 
-st.dataframe(pd.DataFrame(rows), use_container_width=True)
+st.dataframe(pd.DataFrame(rows), width="stretch")
 
 st.caption(
     "PMIs are fetched via FRED search at runtime (top match). "
